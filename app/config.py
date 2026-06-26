@@ -49,6 +49,11 @@ class Settings(BaseSettings):
         default=SecretStr(""), alias="AUTH_DEV_HS256_SECRET"
     )
 
+    # --- Guardrails ---
+    # Optional LLM-judge groundedness (runs on MASKED content, before reidentify). The
+    # deterministic figure-grounding check always runs regardless of this flag.
+    groundedness_llm_judge: bool = Field(default=False, alias="GROUNDEDNESS_LLM_JUDGE")
+
     # --- Misc ---
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     app_env: str = Field(default="local", alias="APP_ENV")

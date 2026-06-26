@@ -12,8 +12,10 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
+
+from app import metrics
 
 from app.auth.oidc import AuthError, verify_token
 from app.auth.permissions import (
@@ -83,6 +85,12 @@ async def authorize(
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> PlainTextResponse:
+    # Prometheus text exposition. No PII/secrets in labels (invariant #7).
+    return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
 
 
 @app.post("/chat")

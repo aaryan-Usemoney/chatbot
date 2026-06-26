@@ -6,7 +6,9 @@ in section 0 are enforced in code, not by convention. This repo implements **Pha
 (skeleton, auth, audit), **Phase 2** (structured text-to-SQL path with masking), **Phase 3**
 (unstructured vector-retrieval path with in-boundary embeddings + reversible PII masking), and
 **Phase 4** (the formal LangGraph graph, masking sandwich as nodes, input/output guardrails with
-groundedness, citations). Only **Phase 5** (eval harness + metrics) remains.
+groundedness, citations), and **Phase 5** (eval harness with metric thresholds, optional
+LLM-judge groundedness, in-process metrics + `/metrics`, expanded leakage coverage). All five
+phases are implemented.
 
 ## Orchestration graph (Phase 4)
 `app/orchestrator/graph.py` compiles a LangGraph `StateGraph`:
@@ -91,13 +93,29 @@ CI gates (BUILD_SPEC section 9): `test_no_raw_sensitive_in_prompt`, `test_access
   out-of-scope) and output guardrails (empty/leak-backstop/groundedness); citations on answers.
   End-to-end tests for both paths, injection refusal, ungrounded-answer block, and no-docs
   short-circuit all green (`tests/test_orchestrator_graph.py`). ✅
+- **Phase 5** — eval harness (`app/eval/`, run `python -m app.eval.harness`) scoring routing /
+  input-guardrail / output-guardrail accuracy and a zero-leakage gate against thresholds;
+  optional LLM-judge groundedness node (`GROUNDEDNESS_LLM_JUDGE`, runs on masked content before
+  reidentify); in-process metrics (`app/metrics.py`) exposed at `GET /metrics` (Prometheus text,
+  no PII in labels); expanded leakage/reidentify-matrix and malicious-chunk-as-data tests. ✅
+
+## Eval harness & metrics
+```bash
+python -m app.eval.harness     # prints metrics JSON; exits non-zero if a threshold is missed
+```
+Thresholds (CI-gated via `tests/test_eval_harness.py`): routing ≥ 0.90, input-guardrail ≥ 0.95,
+output-guardrail ≥ 0.95, leakage == 0. `GET /metrics` exposes request/refusal counters (by
+path/outcome/reason) and a latency summary.
 
 ### Storage policy note (Phase 3)
 Chunk `content` is stored **original** (inside the trust boundary) and masked reversibly at
 retrieval, so authorized users can be re-identified per field. If policy requires
 masked-at-rest, mask before insert in `ingest.py` (marked `TODO(human)`).
 
-## Remaining (Phase 5)
-Evaluation harness (Q/A set), LLM-judge groundedness to augment the deterministic gate,
-monitoring/metrics, and expanded access-control/leakage coverage. Items needing org input are
-marked `TODO(human)` (real schema, claim→scope mapping, sensitive-field catalogue, spaCy model).
+## Productionization (handoff to org)
+All five spec phases are implemented; what remains is org-specific wiring, marked `TODO(human)`
+in code: the real DB schema + RLS/masking to match it, the SSO claim→scope mapping in
+`resolve_permissions`, the sensitive-field catalogue (drives both SQL masking and the Presidio
+recognizer set), the spaCy model choice, and rotating the local-dev role credential into a
+secret manager. Then run the gated suites (`RUN_INTEGRATION=1`, `RUN_PRESIDIO=1`) against the
+live stack and seed a real domain Q/A set into `app/eval/dataset.py`.

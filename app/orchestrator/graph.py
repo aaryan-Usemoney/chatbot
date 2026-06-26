@@ -17,14 +17,19 @@ wiring faithful to the spec diagram and fails closed if permissions are somehow 
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from app import metrics
+
+from app.config import get_settings
 from app.models import Citation, Context, Path, Permissions, User
 from app.nodes import guardrails_in, guardrails_out, reidentify, route
 from app.nodes.audit import write_audit
+from app.nodes.groundedness import judge_groundedness
 from app.nodes.mask import mask_structured, mask_unstructured
 from app.nodes.retrieval_tool import run_retrieval_path
 from app.nodes.sql_tool import run_sql_path
@@ -146,6 +151,25 @@ async def n_synthesize(state: ChatState) -> dict[str, Any]:
     return {"raw_answer": raw}
 
 
+async def n_groundedness(state: ChatState) -> dict[str, Any]:
+    # Optional LLM judge on MASKED content, before reidentify (invariant #1). No-op when off.
+    if not get_settings().groundedness_llm_judge:
+        return {}
+    ok = judge_groundedness(
+        state["raw_answer"],
+        state.get("masked_text", ""),
+        forbidden_values=state.get("forbidden", []),
+    )
+    if not ok:
+        return {
+            "refused": True,
+            "reason": "answer failed groundedness judge",
+            "answer": None,
+            "decision": "refused:groundedness_judge",
+        }
+    return {}
+
+
 async def n_reidentify(state: ChatState) -> dict[str, Any]:
     answer = reidentify.reidentify(
         request_id=state["request_id"],
@@ -225,6 +249,10 @@ def _gate_retrieve(state: ChatState) -> str:
     return "mask" if state["result"]["chunks"] else "no_docs"
 
 
+def _gate_groundedness(state: ChatState) -> str:
+    return "refuse" if state.get("refused") else "reidentify"
+
+
 def _gate_out(state: ChatState) -> str:
     return "refuse" if state.get("refused") else "audit"
 
@@ -239,6 +267,7 @@ def _build_graph():
     g.add_node("no_docs", n_no_docs)
     g.add_node("mask", n_mask)
     g.add_node("synthesize", n_synthesize)
+    g.add_node("groundedness", n_groundedness)
     g.add_node("reidentify", n_reidentify)
     g.add_node("guardrails_out", n_guardrails_out)
     g.add_node("refuse", n_refuse)
@@ -260,7 +289,10 @@ def _build_graph():
     )
     g.add_edge("no_docs", "audit")
     g.add_edge("mask", "synthesize")
-    g.add_edge("synthesize", "reidentify")
+    g.add_edge("synthesize", "groundedness")
+    g.add_conditional_edges(
+        "groundedness", _gate_groundedness, {"refuse": "refuse", "reidentify": "reidentify"}
+    )
     g.add_edge("reidentify", "guardrails_out")
     g.add_conditional_edges(
         "guardrails_out", _gate_out, {"refuse": "refuse", "audit": "audit"}
@@ -292,9 +324,18 @@ async def run_chat(
         "permissions": permissions,
         "vault": vault,
     }
+    t0 = time.perf_counter()
     final: ChatState = await _graph.ainvoke(initial)
+    metrics.observe("chat_latency_seconds", time.perf_counter() - t0)
+
+    path = final.get("path") or "none"
     if final.get("refused"):
-        return ChatResult(answer=None, refused=True, reason=final.get("reason"))
+        reason = final.get("reason") or "unspecified"
+        metrics.inc("chat_requests_total", {"path": path, "outcome": "refused"})
+        metrics.inc("chat_refusals_total", {"reason": reason})
+        return ChatResult(answer=None, refused=True, reason=reason)
+
+    metrics.inc("chat_requests_total", {"path": path, "outcome": "answered"})
     return ChatResult(answer=final.get("answer"), citations=final.get("citations", []))
 
 
