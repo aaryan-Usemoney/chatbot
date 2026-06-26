@@ -29,6 +29,17 @@ _INJECTION_PATTERNS = (
 )
 _INJECTION_RE = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE)
 
+# Conservative out-of-scope markers: clearly off-domain creative/general-assistant requests.
+# Kept narrow to avoid refusing legitimate data questions.
+_OUT_OF_SCOPE_PATTERNS = (
+    r"\bwrite (me )?(a|an) (poem|song|story|joke|essay|script)\b",
+    r"\btell me a joke\b",
+    r"\bwhat'?s the weather\b",
+    r"\b(translate|summarize) this (text|article|paragraph)\b",
+    r"\bwrite (some )?(python|javascript|sql|code) (for|to)\b",
+)
+_OUT_OF_SCOPE_RE = re.compile("|".join(_OUT_OF_SCOPE_PATTERNS), re.IGNORECASE)
+
 
 def check_input(message: str, user: User) -> Decision:  # noqa: ARG001
     text = (message or "").strip()
@@ -38,4 +49,6 @@ def check_input(message: str, user: User) -> Decision:  # noqa: ARG001
         return Decision(allow=False, reason="message too long")
     if _INJECTION_RE.search(text):
         return Decision(allow=False, reason="input rejected by injection guardrail")
+    if _OUT_OF_SCOPE_RE.search(text):
+        return Decision(allow=False, reason="out-of-scope request")
     return Decision(allow=True)

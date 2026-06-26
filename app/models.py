@@ -89,13 +89,18 @@ class Citation:
 class Context:
     """The retrieved, masked context that synthesis was grounded in.
 
-    Used by the output guardrail (groundedness) and by the audit node (sources).
+    Used by the output guardrail (groundedness + leak backstop) and by the audit node.
     """
 
     path: Path
     masked_text: str
     citations: list[Citation] = field(default_factory=list)
     sources: list[dict[str, Any]] = field(default_factory=list)
+    # The original question (groundedness allows figures the user themselves provided).
+    question: str = ""
+    # Raw values the requesting user is NOT permitted to see — must never appear in the
+    # final answer (invariant #6 backstop checked by the output guardrail).
+    unpermitted_values: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

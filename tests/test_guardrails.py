@@ -1,8 +1,5 @@
-"""CI gate #4 (partial; full groundedness check lands in Phase 4).
-
-Input guardrails refuse injection / jailbreak / empty / oversized input; output guardrails
-refuse empty answers. Models the refusal routing in BUILD_SPEC section 6.
-"""
+"""CI gate #4: input refusals (injection/jailbreak/out-of-scope) and output guardrails
+(empty, ungrounded figures, invariant #6 leak backstop)."""
 
 from __future__ import annotations
 
@@ -33,12 +30,46 @@ def test_empty_and_oversized_inputs_refused():
     assert check_input("a" * 5000, USER).allow is False
 
 
+def test_out_of_scope_input_refused():
+    assert check_input("Write me a poem about spring", USER).allow is False
+    assert check_input("tell me a joke", USER).allow is False
+
+
 def test_normal_question_allowed():
     d = check_input("What were total sales by region last quarter?", USER)
     assert d.allow is True
 
 
+# --- output guardrails ------------------------------------------------------------------
+
+_CTX = Context(
+    path=Path.SQL,
+    masked_text="[{'region': 'EMEA', 'total': 1500.00}]",
+    question="total sales?",
+)
+
+
 def test_empty_answer_refused():
-    ctx = Context(path=Path.SQL, masked_text="[]")
-    assert check_output("", ctx, USER).allow is False
-    assert check_output("Total sales were 1500.", ctx, USER).allow is True
+    assert check_output("", _CTX, USER).allow is False
+
+
+def test_grounded_answer_allowed():
+    assert check_output("Total EMEA sales were 1500.00.", _CTX, USER).allow is True
+
+
+def test_ungrounded_figure_blocked():
+    d = check_output("Total sales were 9999.99.", _CTX, USER)
+    assert d.allow is False
+    assert "grounded" in (d.reason or "")
+
+
+def test_unpermitted_value_leak_blocked():
+    ctx = Context(
+        path=Path.SQL,
+        masked_text="[{'name': 'Alice'}]",
+        question="who?",
+        unpermitted_values=["111-11-1111"],
+    )
+    d = check_output("Alice's SSN is 111-11-1111.", ctx, USER)
+    assert d.allow is False
+    assert "may not see" in (d.reason or "")
