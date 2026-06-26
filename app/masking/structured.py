@@ -19,16 +19,10 @@ Columns that some roles may un-mask are intentionally left for this reversible l
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
+from app.masking.tokens import TokenAllocator, unmask_text
 from app.models import Masked, MaskCtx, Permissions
-
-_TOKEN_RE = re.compile(r"<[A-Z0-9_]+_\d+>")
-
-
-def _token_for(field: str, n: int) -> str:
-    return f"<{field.upper()}_{n}>"
 
 
 class StructuredTokenMasker:
@@ -40,40 +34,19 @@ class StructuredTokenMasker:
 
         sensitive = ctx.sensitive_fields
         rows: list[dict[str, Any]] = payload["rows"]
-
-        # value->token cache keyed by field for determinism within the request.
-        value_to_token: dict[tuple[str, str], str] = {}
-        token_map: dict[str, dict[str, str]] = {}
-        counters: dict[str, int] = {}
+        alloc = TokenAllocator()
 
         masked_rows: list[dict[str, Any]] = []
         for row in rows:
             masked_row: dict[str, Any] = {}
             for col, val in row.items():
                 if col in sensitive and val is not None:
-                    sval = str(val)
-                    key = (col, sval)
-                    token = value_to_token.get(key)
-                    if token is None:
-                        counters[col] = counters.get(col, 0) + 1
-                        token = _token_for(col, counters[col])
-                        value_to_token[key] = token
-                        token_map[token] = {"value": sval, "field": col}
-                    masked_row[col] = token
+                    masked_row[col] = alloc.token(col, str(val))
                 else:
                     masked_row[col] = val
             masked_rows.append(masked_row)
 
-        return Masked(payload={**payload, "rows": masked_rows}, token_map=token_map)
+        return Masked(payload={**payload, "rows": masked_rows}, token_map=alloc.token_map)
 
     def unmask(self, text: str, token_map: dict, permissions: Permissions) -> str:
-        def _replace(m: re.Match[str]) -> str:
-            token = m.group(0)
-            entry = token_map.get(token)
-            if entry is None:
-                return token  # unknown token: leave as-is
-            if permissions.may_unmask(entry["field"]):
-                return entry["value"]
-            return token  # not authorized for this field -> stays masked (invariant #6)
-
-        return _TOKEN_RE.sub(_replace, text)
+        return unmask_text(text, token_map, permissions)

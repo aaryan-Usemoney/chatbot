@@ -19,3 +19,26 @@ DROP POLICY IF EXISTS sales_by_region ON sales;
 CREATE POLICY sales_by_region ON sales
   FOR SELECT
   USING (region = current_setting('app.user_region', true));
+
+-- doc_chunks (Phase 3): metadata filtering is the documented enforcement for vector
+-- retrieval (invariant #2), but we ALSO enforce it as RLS so the read-only role cannot read
+-- a chunk whose access_tags don't overlap the request's app.user_tags scope, even if app code
+-- forgot the filter. Created only if doc_chunks exists (i.e. pgvector was available).
+-- Fail-closed: an unset/empty scope -> string_to_array(NULL/'' ) -> no overlap -> no rows.
+DO $do$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables
+             WHERE table_schema = 'public' AND table_name = 'doc_chunks') THEN
+    EXECUTE 'ALTER TABLE doc_chunks ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'DROP POLICY IF EXISTS doc_chunks_by_tags ON doc_chunks';
+    EXECUTE $pol$
+      CREATE POLICY doc_chunks_by_tags ON doc_chunks
+        FOR SELECT
+        USING (
+          access_tags && string_to_array(
+            nullif(current_setting('app.user_tags', true), ''), ','
+          )
+        )
+    $pol$;
+  END IF;
+END $do$;

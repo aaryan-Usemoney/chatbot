@@ -13,8 +13,10 @@ import pytest
 
 from app.llm import groq_client
 from app.llm.groq_client import RawSensitiveLeak, assert_contains_no_raw_sensitive
-from app.nodes.mask import mask_structured
-from app.nodes.synthesize import synthesize_answer
+from app.masking.pii_detect import RegexPiiDetector
+from app.masking.presidio_masker import PresidioMasker
+from app.nodes.mask import mask_structured, mask_unstructured
+from app.nodes.synthesize import synthesize_answer, synthesize_answer_from_chunks
 
 SEEDED = {"email": "alice@example.com", "ssn": "111-11-1111", "phone": "555-0101"}
 
@@ -77,6 +79,37 @@ def test_masked_prompt_contains_no_raw_sensitive(captured, manager_perms, vault)
     blob = json.dumps(captured["messages"])
     for raw_value in SEEDED.values():
         assert raw_value not in blob, f"raw value leaked into prompt: {raw_value!r}"
+
+
+def test_masked_doc_prompt_contains_no_raw_pii(captured, manager_perms, vault):
+    raw_result = {
+        "chunks": [
+            {
+                "id": 1,
+                "document_id": "doc1",
+                "content": (
+                    "Contact Alice at alice@example.com or 555-123-4567. "
+                    "Her SSN is 111-11-1111."
+                ),
+            }
+        ],
+        "sources": [{"kind": "document", "ref": "doc1"}],
+    }
+    masker = PresidioMasker(detector=RegexPiiDetector())
+    masked_result, forbidden = mask_unstructured(
+        request_id="reqdoc", result=raw_result, permissions=manager_perms,
+        vault=vault, masker=masker,
+    )
+    assert {"alice@example.com", "555-123-4567", "111-11-1111"} <= set(forbidden)
+
+    answer = synthesize_answer_from_chunks(
+        "Who do I contact?", masked_result, forbidden_values=forbidden
+    )
+    assert answer
+
+    blob = json.dumps(captured["messages"])
+    for raw_value in ("alice@example.com", "555-123-4567", "111-11-1111"):
+        assert raw_value not in blob, f"raw PII leaked into prompt: {raw_value!r}"
 
 
 def test_guard_raises_on_raw_value():

@@ -104,3 +104,46 @@ async def run_readonly_query(
             rows = await cur.fetchall()
         await conn.rollback()  # read-only: nothing to commit
         return rows
+
+
+async def run_readonly_vector_search(
+    query_vector: list[float],
+    permissions: Permissions,
+    *,
+    k: int = 5,
+) -> list[dict[str, Any]]:
+    """Similarity search over doc_chunks under the masked read-only role.
+
+    Access control is enforced two ways (invariant #2): an explicit
+    ``access_tags && :allowed_tags`` filter AND a doc_chunks RLS policy keyed on the
+    ``app.user_tags`` scope set here. An empty tag set or unset scope matches no rows
+    (fail-closed).
+    """
+    allowed = sorted(permissions.allowed_tags)
+    if not allowed:
+        return []  # no tags -> nothing visible; don't even issue the query
+
+    pool = _require(_readonly_pool, "readonly_pool")
+    qvec = "[" + ",".join(f"{x:.8f}" for x in query_vector) + "]"
+    async with pool.connection() as conn:
+        await conn.set_autocommit(False)
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SET TRANSACTION READ ONLY")
+            # Defense-in-depth RLS scope (comma-joined tag list).
+            await cur.execute(
+                "SELECT set_config('app.user_tags', %s, true)", (",".join(allowed),)
+            )
+            await cur.execute(
+                """
+                SELECT id, document_id, content, metadata,
+                       1 - (embedding <=> %(qvec)s::vector) AS similarity
+                FROM doc_chunks
+                WHERE access_tags && %(tags)s
+                ORDER BY embedding <=> %(qvec)s::vector
+                LIMIT %(k)s
+                """,
+                {"qvec": qvec, "tags": allowed, "k": k},
+            )
+            rows = await cur.fetchall()
+        await conn.rollback()
+        return rows

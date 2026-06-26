@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # --- Embeddings (local) ---
     embedding_model: str = Field(default="BAAI/bge-small-en-v1.5", alias="EMBEDDING_MODEL")
 
+    # --- PII detection (local, Presidio) ---
+    presidio_spacy_model: str = Field(default="en_core_web_lg", alias="PRESIDIO_SPACY_MODEL")
+
     # --- Postgres ---
     database_url: SecretStr = Field(default=SecretStr(""), alias="DATABASE_URL")
     database_url_readonly: SecretStr = Field(

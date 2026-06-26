@@ -1,18 +1,20 @@
 # Governed RAG Chatbot — Phases 1–2
 
-Conversational assistant over sensitive structured data with per-user access control and
-LLM data-isolation. Built to `BUILD_SPEC.md`; the non-negotiable invariants in section 0 are
-enforced in code, not by convention. This repo currently implements **Phase 1** (skeleton,
-auth, audit) and **Phase 2** (structured text-to-SQL path with masking). Phases 3–5 are
-stubbed behind their final interfaces.
+Conversational assistant over sensitive structured **and unstructured** data with per-user
+access control and LLM data-isolation. Built to `BUILD_SPEC.md`; the non-negotiable invariants
+in section 0 are enforced in code, not by convention. This repo implements **Phase 1**
+(skeleton, auth, audit), **Phase 2** (structured text-to-SQL path with masking), and **Phase 3**
+(unstructured vector-retrieval path with in-boundary embeddings + reversible PII masking).
+Phases 4–5 (formal LangGraph graph, full guardrails/groundedness, eval harness) remain.
 
 ## How the invariants are enforced
 
 | Invariant | Mechanism | Location |
 |---|---|---|
-| #1 Raw sensitive never reaches the LLM | App-side reversible tokenization before any prompt + a hard guard that raises on egress | `app/masking/structured.py`, `app/llm/groq_client.py` |
-| #2 Access control at the data layer | Postgres RLS + per-request `SET LOCAL` scopes + read-only role | `db/003_rls.sql`, `app/data/db.py` |
-| #6 Reidentification is per-field, permission-gated | `unmask` restores a token only if `permissions.may_unmask(field)` | `app/nodes/reidentify.py` |
+| #1 Raw sensitive never reaches the LLM | Reversible tokenization (structured) / Presidio PII masking (text) before any prompt + a hard guard that raises on egress | `app/masking/`, `app/llm/groq_client.py` |
+| #2 Access control at the data layer | RLS + `SET LOCAL` scopes + read-only role (structured); `access_tags` filter + doc_chunks RLS (vector) | `db/003_rls.sql`, `app/data/db.py` |
+| #4 Embeddings stay in-boundary | Self-hosted sentence-transformers; module makes no network calls | `app/data/embeddings.py` |
+| #6 Reidentification is per-field, permission-gated | One shared `unmask` restores a token only if `permissions.may_unmask(field)` | `app/masking/tokens.py`, `app/nodes/reidentify.py` |
 | #8 Query role is read-only | Column-scoped `SELECT`-only GRANTs + `READ ONLY` transaction + single-SELECT validator | `db/005_roles.sql`, `app/nodes/sql_tool.py` |
 
 ### Masking design decision (read this)
@@ -42,9 +44,15 @@ RS256/JWKS validation then takes over automatically.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest                        # unit tests (no DB/network needed)
-RUN_INTEGRATION=1 pytest      # also runs RLS / read-only tests (needs docker compose up)
+pytest                        # unit tests (no DB / network / spaCy needed)
+RUN_INTEGRATION=1 pytest      # also runs RLS / read-only / doc-RLS tests (needs docker compose up)
+RUN_PRESIDIO=1 pytest         # also runs the live Presidio detector test (needs spaCy model)
 ```
+
+PII masking detection is pluggable (`app/masking/pii_detect.py`): production uses
+`PresidioDetector` (Presidio + spaCy); a dependency-free `RegexPiiDetector` (email/phone/SSN/
+card) drives the masking core in CI and serves as a lightweight-deployment fallback. The
+masking/token/reidentification logic is identical either way.
 
 CI gates (BUILD_SPEC section 9): `test_no_raw_sensitive_in_prompt`, `test_access_control`,
 `test_masking_roundtrip`, `test_guardrails` (+ `test_sql_validation`, `test_auth`).
@@ -56,8 +64,18 @@ CI gates (BUILD_SPEC section 9): `test_no_raw_sensitive_in_prompt`, `test_access
 - **Phase 2** — `001`–`005` migrations, text-to-SQL with single-read-only-SELECT validation,
   execution under the masked read-only role with `SET LOCAL` RLS scopes, app-side masking;
   `test_no_raw_sensitive_in_prompt` green for the structured path. ✅
+- **Phase 3** — local embeddings (`embeddings.py`), `ingest.py` (chunk→embed→index with
+  `access_tags`), retrieval node (pgvector similarity + `access_tags` filter + doc_chunks RLS),
+  reversible Presidio PII masking before synthesis; `test_no_raw_sensitive_in_prompt` green for
+  the unstructured path; document text never leaves the boundary for embedding (invariant #4).
+  ✅ (live pgvector retrieval + ingest verified via the gated integration test.)
 
-## What's stubbed (Phases 3–5)
-`app/data/ingest.py`, `app/nodes/retrieval_tool.py`, `app/masking/presidio_masker.py` raise
-`NotImplementedError` behind their final signatures. Items needing org input are marked
-`TODO(human)` (real schema, claim→scope mapping, sensitive-field catalogue).
+### Storage policy note (Phase 3)
+Chunk `content` is stored **original** (inside the trust boundary) and masked reversibly at
+retrieval, so authorized users can be re-identified per field. If policy requires
+masked-at-rest, mask before insert in `ingest.py` (marked `TODO(human)`).
+
+## Remaining (Phases 4–5)
+Formal LangGraph compiled graph, full input/output guardrails incl. groundedness, citations
+polish, eval harness + metrics. Items needing org input are marked `TODO(human)` (real schema,
+claim→scope mapping, sensitive-field catalogue, spaCy model choice).

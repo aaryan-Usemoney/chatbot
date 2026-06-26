@@ -24,8 +24,9 @@ from app.masking.interface import TokenVault
 from app.models import Citation, Context, Path, Permissions
 from app.nodes import guardrails_in, guardrails_out, reidentify, route
 from app.nodes.audit import write_audit
-from app.nodes.mask import mask_structured
-from app.nodes.synthesize import synthesize_answer
+from app.nodes.mask import mask_structured, mask_unstructured
+from app.nodes.retrieval_tool import run_retrieval_path
+from app.nodes.synthesize import synthesize_answer, synthesize_answer_from_chunks
 from app.nodes.sql_tool import run_sql_path
 from app.observability import get_logger, redact
 from app.models import User
@@ -63,29 +64,45 @@ async def run_chat(
 
     # 2. Route.
     path = route.route(message, permissions)
-    if path is not Path.SQL:
-        # Retrieval path arrives in Phase 3.
+
+    # 3-5. Retrieve -> mask -> synthesize, per path. Both produce (raw_answer, sources,
+    # masked_text) over MASKED content only; the LLM guard aborts on any raw leak.
+    if path is Path.SQL:
+        result: dict[str, Any] = await run_sql_path(message, permissions)
+        masked_result, forbidden = mask_structured(
+            request_id=request_id, result=result, permissions=permissions, vault=vault
+        )
+        raw_answer = synthesize_answer(message, masked_result, forbidden_values=forbidden)
+        masked_text = str(masked_result["rows"])
+    elif path is Path.RETRIEVAL:
+        result = await run_retrieval_path(message, permissions)
+        if not result["chunks"]:
+            # No permitted chunks matched -> don't generate ungrounded text.
+            await write_audit(
+                user_id=permissions.user_id,
+                masked_question=redact(message),
+                sources=[],
+                decision="answered:no_documents",
+            )
+            return ChatResult(
+                answer="I don't have any documents you're permitted to see that match that question.",
+                citations=[],
+            )
+        masked_result, forbidden = mask_unstructured(
+            request_id=request_id, result=result, permissions=permissions, vault=vault
+        )
+        raw_answer = synthesize_answer_from_chunks(
+            message, masked_result, forbidden_values=forbidden
+        )
+        masked_text = str([c["content"] for c in masked_result["chunks"]])
+    else:
         await write_audit(
             user_id=permissions.user_id,
             masked_question=redact(message),
             sources=None,
-            decision="refused:unsupported_path",
+            decision="refused:unroutable",
         )
-        return ChatResult(answer=None, refused=True, reason="path not available yet")
-
-    # 3. Structured retrieval (read-only masked role + RLS).
-    result: dict[str, Any] = await run_sql_path(message, permissions)
-
-    # 4. Mask (left slice of the sandwich) + stash token map in the vault.
-    masked_result, forbidden = mask_structured(
-        request_id=request_id,
-        result=result,
-        permissions=permissions,
-        vault=vault,
-    )
-
-    # 5. Synthesize over masked content only (Groq; guard aborts on any raw leak).
-    raw_answer = synthesize_answer(message, masked_result, forbidden_values=forbidden)
+        return ChatResult(answer=None, refused=True, reason="could not route question")
 
     # 6. Reidentify per permission (invariant #6).
     answer = reidentify.reidentify(
@@ -96,7 +113,7 @@ async def run_chat(
     )
 
     citations = [Citation(kind=s["kind"], ref=s["ref"]) for s in result["sources"]]
-    context = Context(path=Path.SQL, masked_text=str(masked_result["rows"]), citations=citations,
+    context = Context(path=path, masked_text=masked_text, citations=citations,
                       sources=result["sources"])
 
     # 7. Output guardrail.

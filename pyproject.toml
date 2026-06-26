@@ -41,6 +41,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: requires a live Postgres + Redis (docker-compose up)",
+    "presidio: requires Presidio + a spaCy model (set RUN_PRESIDIO=1)",
 ]
 
 [tool.ruff]

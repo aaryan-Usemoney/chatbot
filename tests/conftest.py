@@ -59,9 +59,16 @@ def vault() -> InMemoryTokenVault:
 
 
 def pytest_collection_modifyitems(config, items):
-    if os.environ.get("RUN_INTEGRATION") == "1":
-        return
-    skip = pytest.mark.skip(reason="integration test; set RUN_INTEGRATION=1 with stack up")
+    run_integration = os.environ.get("RUN_INTEGRATION") == "1"
+    run_presidio = os.environ.get("RUN_PRESIDIO") == "1"
+    skip_integration = pytest.mark.skip(
+        reason="integration test; set RUN_INTEGRATION=1 with stack up"
+    )
+    skip_presidio = pytest.mark.skip(
+        reason="needs Presidio + spaCy model; set RUN_PRESIDIO=1"
+    )
     for item in items:
-        if "integration" in item.keywords:
-            item.add_marker(skip)
+        if "integration" in item.keywords and not run_integration:
+            item.add_marker(skip_integration)
+        if "presidio" in item.keywords and not run_presidio:
+            item.add_marker(skip_presidio)
