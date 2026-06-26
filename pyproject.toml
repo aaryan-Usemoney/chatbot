@@ -1,0 +1,63 @@
+[project]
+name = "governed-rag-chatbot"
+version = "0.1.0"
+description = "Governed RAG chatbot over sensitive structured + unstructured data"
+requires-python = ">=3.11"
+dependencies = [
+    # API
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    # Auth (OIDC / JWT)
+    "pyjwt[crypto]>=2.8",
+    # DB (psycopg3 async + pool) and SQL validation
+    "psycopg[binary,pool]>=3.1",
+    "sqlglot>=23.0",
+    # Redis (token vault, cache)
+    "redis>=5.0",
+    # LLM (Groq via OpenAI-compatible client)
+    "openai>=1.30",
+    # Orchestration
+    "langgraph>=0.2",
+    "langchain-core>=0.2",
+    # Unstructured path (Phase 3)
+    "sentence-transformers>=2.7",
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: requires a live Postgres + Redis (docker-compose up)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+disallow_untyped_defs = false
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app"]

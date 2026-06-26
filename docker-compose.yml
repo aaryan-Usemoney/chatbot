@@ -1,0 +1,57 @@
+# Local development stack.
+#   - postgres: ships pgvector; we install `anon` (PostgreSQL Anonymizer) and pgcrypto on init.
+#   - redis: token vault (per-request TTL) + sessions/cache.
+#   - api: the FastAPI app.
+#
+# The image `registry.gitlab.com/dalibo/postgresql_anonymizer` bundles Postgres + pgvector + anon,
+# which is what invariants #2 and #1 (structured masking) rely on.
+
+services:
+  postgres:
+    image: registry.gitlab.com/dalibo/postgresql_anonymizer:stable
+    # This image auto-loads the anon extension via shared_preload_libraries.
+    environment:
+      POSTGRES_DB: chatbot
+      POSTGRES_USER: chatbot_owner
+      POSTGRES_PASSWORD: owner_pw
+    ports:
+      - "5432:5432"
+    volumes:
+      # Migrations run in lexical order on first init of an empty data dir.
+      - ./db:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot_owner -d chatbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      # Inside the compose network, reach services by name.
+      DATABASE_URL: postgresql://chatbot_owner:owner_pw@postgres:5432/chatbot
+      DATABASE_URL_READONLY: postgresql://chatbot_readonly:readonly_pw@postgres:5432/chatbot
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
