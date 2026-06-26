@@ -7,27 +7,32 @@ failure) -> orchestrate -> stream. Every request produces an audit row (in the o
 from __future__ import annotations
 
 import json
+import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import metrics
-
 from app.auth.oidc import AuthError, verify_token
 from app.auth.permissions import (
     PermissionError_,
     resolve_permissions,
     user_from_claims,
 )
+from app.config import get_settings
 from app.data.db import close_pools, init_pools
 from app.masking.vault_redis import RedisTokenVault
 from app.models import Permissions, User
 from app.observability import get_logger
 from app.orchestrator.graph import run_chat_stream
+
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 log = get_logger(__name__)
 _vault = RedisTokenVault()
@@ -82,9 +87,47 @@ async def authorize(
     return user, permissions
 
 
+@app.get("/")
+async def index() -> FileResponse:
+    return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+class DevTokenRequest(BaseModel):
+    sub: str = Field(default="dev-user", max_length=128)
+    roles: list[str] = Field(default_factory=lambda: ["manager"])
+    region: str = Field(default="EMEA", max_length=64)
+
+
+@app.post("/dev/token")
+async def dev_token(req: DevTokenRequest) -> dict[str, str]:
+    """DEV-ONLY: mint an HS256 token so the thin UI works without a real IdP.
+
+    Hard-gated: returns 404 unless AUTH_DEV_MODE is on and APP_ENV is non-production. This
+    endpoint must never be reachable in a deployed environment.
+    """
+    settings = get_settings()
+    if settings.is_production or not settings.auth_dev_mode:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    secret = settings.auth_dev_hs256_secret.get_secret_value()
+    if not secret:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    now = int(time.time())
+    claims = {
+        "sub": req.sub,
+        "roles": req.roles,
+        "region": req.region,
+        "iat": now,
+        "exp": now + 3600,
+    }
+    if settings.oidc_audience:
+        claims["aud"] = settings.oidc_audience
+    return {"token": jwt.encode(claims, secret, algorithm="HS256")}
 
 
 @app.get("/metrics")

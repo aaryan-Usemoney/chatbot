@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Governed RAG Chatbot</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1f232c; --border: #2a2f3a;
+    --text: #e6e8ec; --muted: #9aa3b2; --accent: #5b9dff; --accent-2: #2a3a57;
+    --user: #243044; --bot: #1b1f27; --danger: #ff6b6b; --ok: #58d68d;
+    --radius: 12px; --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 12px 18px; border-bottom: 1px solid var(--border); display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .spacer { flex: 1; }
+  select, button, input { font-family: var(--font); font-size: 14px; }
+  select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+  label { color: var(--muted); font-size: 12px; margin-right: 4px; }
+  button { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 7px 14px; cursor: pointer; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  #status { font-size: 12px; color: var(--muted); }
+  #status.connected { color: var(--ok); }
+  #log { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: 760px; width: fit-content; padding: 11px 14px; border-radius: var(--radius); line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.user { align-self: flex-end; background: var(--user); border: 1px solid var(--accent-2); }
+  .msg.bot { align-self: flex-start; background: var(--bot); border: 1px solid var(--border); }
+  .msg.refusal { align-self: flex-start; background: #2a1b1f; border: 1px solid #5a2a2f; color: #ffd2d2; }
+  .cites { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+  .chip { font-size: 11px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); border-radius: 999px; padding: 3px 9px; }
+  .chip b { color: var(--accent); font-weight: 600; }
+  .role { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  footer { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; gap: 10px; }
+  #q { flex: 1; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; outline: none; }
+  #q:focus { border-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; padding: 0 18px 10px; }
+  .empty { color: var(--muted); margin: auto; text-align: center; font-size: 14px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Governed RAG Chatbot</h1>
+    <span id="status">not connected</span>
+    <div class="spacer"></div>
+    <label for="role">role</label>
+    <select id="role">
+      <option value="analyst">analyst</option>
+      <option value="manager" selected>manager</option>
+      <option value="admin">admin</option>
+    </select>
+    <label for="region">region</label>
+    <select id="region">
+      <option value="EMEA" selected>EMEA</option>
+      <option value="AMER">AMER</option>
+    </select>
+    <button id="connect" class="ghost">Connect</button>
+  </header>
+
+  <div id="log"><div class="empty">Connect with a role, then ask a question.</div></div>
+  <div class="hint">Dev mode: a per-role token is minted via <code>/dev/token</code>. Try “total revenue by region?” (SQL) or “what does the policy document say?” (retrieval).</div>
+
+  <footer>
+    <input id="q" placeholder="Ask a question…" autocomplete="off" disabled />
+    <button id="send" disabled>Send</button>
+  </footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const log = $("log"), statusEl = $("status");
+let token = null, busy = false;
+
+function clearEmpty() { const e = log.querySelector(".empty"); if (e) e.remove(); }
+
+function addMsg(cls, text, role) {
+  clearEmpty();
+  const wrap = document.createElement("div");
+  if (role) { const r = document.createElement("div"); r.className = "role"; r.textContent = role; wrap.appendChild(r); }
+  const m = document.createElement("div");
+  m.className = "msg " + cls;
+  m.textContent = text;
+  wrap.appendChild(m);
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+  return m;
+}
+
+function addCitations(msgEl, cites) {
+  if (!cites || !cites.length) return;
+  const c = document.createElement("div");
+  c.className = "cites";
+  for (const cite of cites) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.innerHTML = `<b>${cite.kind}</b> ${cite.ref}`;
+    c.appendChild(chip);
+  }
+  msgEl.parentElement.appendChild(c);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function connect() {
+  const roles = [$("role").value];
+  const region = $("region").value;
+  statusEl.textContent = "connecting…"; statusEl.className = "";
+  try {
+    const res = await fetch("/dev/token", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sub: "ui-" + roles[0], roles, region }),
+    });
+    if (!res.ok) throw new Error("token endpoint returned " + res.status);
+    token = (await res.json()).token;
+    statusEl.textContent = `connected as ${roles[0]} (${region})`;
+    statusEl.className = "connected";
+    $("q").disabled = false; $("send").disabled = false; $("q").focus();
+  } catch (e) {
+    statusEl.textContent = "connect failed: " + e.message; statusEl.className = "";
+  }
+}
+
+async function send() {
+  const q = $("q").value.trim();
+  if (!q || busy || !token) return;
+  busy = true; $("send").disabled = true; $("q").disabled = true;
+  addMsg("user", q, null);
+  $("q").value = "";
+  const botEl = addMsg("bot", "", `assistant`);
+
+  try {
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({ message: q }),
+    });
+    if (res.status === 401 || res.status === 403) {
+      botEl.parentElement.remove();
+      addMsg("refusal", "Not authorized (" + res.status + "). Reconnect with a role.", null);
+      return;
+    }
+    if (!res.ok || !res.body) throw new Error("server returned " + res.status);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "", refused = false;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const frames = buf.split("\n\n");
+      buf = frames.pop();
+      for (const frame of frames) {
+        const line = frame.trim();
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        let evt; try { evt = JSON.parse(payload); } catch { continue; }
+        if (evt.type === "token") { botEl.textContent += evt.text; }
+        else if (evt.type === "citations") { addCitations(botEl, evt.citations); }
+        else if (evt.type === "refusal") {
+          refused = true;
+          botEl.parentElement.remove();
+          addMsg("refusal", "Refused: " + (evt.reason || "request blocked"), null);
+        }
+        log.scrollTop = log.scrollHeight;
+      }
+    }
+    if (!refused && !botEl.textContent) botEl.textContent = "(no answer)";
+  } catch (e) {
+    botEl.textContent = "Error: " + e.message;
+  } finally {
+    busy = false; $("send").disabled = false; $("q").disabled = false; $("q").focus();
+  }
+}
+
+$("connect").addEventListener("click", connect);
+$("send").addEventListener("click", send);
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+</script>
+</body>
+</html>
